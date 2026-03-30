@@ -107,7 +107,7 @@ class BatchDownloader:
         from src.grpc.manager import WrapperManager
         from src.logger import GlobalLogger
         from src.qemu import QemuInstance
-        from src.utils import check_dep, run_sync, safely_create_task, config_outdated
+        from src.utils import check_dep, run_sync, config_outdated
 
         # Check dependencies
         dep_installed, missing_dep = check_dep()
@@ -135,7 +135,9 @@ class BatchDownloader:
             await it(WrapperManager).init(it(Config).instance.url, it(Config).instance.secure)
 
         # Start decrypt stream with reconnection support
-        safely_create_task(it(WrapperManager).decrypt_init(
+        # Use asyncio.create_task directly (not safely_create_task) because this is a
+        # long-running infrastructure task that shouldn't block wait_for_completion()
+        asyncio.create_task(it(WrapperManager).decrypt_init(
             on_success=self.ripper.on_decrypt_success,
             on_failure=self.ripper.on_decrypt_failed,
             max_reconnect_attempts=it(Config).download.maxReconnectAttempts,
