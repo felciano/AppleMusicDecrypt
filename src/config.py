@@ -32,6 +32,10 @@ class Download(BaseModel):
     proxy: str = ""
     parallelNum: int = 1
     maxRunningTasks: int = 128
+    queueDelay: float = 5.0
+    maxReconnectAttempts: int = 0  # 0 = unlimited
+    reconnectDelay: float = 5.0
+    decryptTimeout: float = 60.0  # Timeout for individual decrypt requests
     appleCDNIP: str = ""
     codecAlternative: bool = True
     codecPriority: list[str] = ["alac", "ec3", "ac3", "aac"]

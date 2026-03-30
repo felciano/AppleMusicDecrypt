@@ -48,8 +48,13 @@ class DownloadManager:
 
 
 class Ripper:
-    def __init__(self):
+    def __init__(self, on_start=None, on_success=None, on_failure=None, on_skip=None):
         self.download_manager = DownloadManager()
+        # Optional stat callbacks
+        self._on_start = on_start  # Called when song rip starts
+        self._on_success = on_success  # Called on successful save
+        self._on_failure = on_failure  # Called on failure (name, error)
+        self._on_skip = on_skip  # Called when song already exists
 
     async def rip_song(self, url: Song, codec: str, flags: Flags = Flags(),
                        parent_done: ParentDoneHandler = None, playlist: PlaylistInfo = None,
@@ -80,6 +85,10 @@ class Ripper:
             task.logger.set_fullname(task.metadata.artist, task.metadata.title)
             task.logger.create()
 
+            # Stat callback: song started
+            if self._on_start:
+                self._on_start(task.logger.full_name)
+
             # Check Language
             if it(Config).region.languageNotExistWarning and not language_exist(url.storefront, flags.language):
                 default_language, _ = query_language(url.storefront)
@@ -107,6 +116,9 @@ class Ripper:
             if not flags.force_save and check_song_exists(task.metadata, codec, playlist):
                 task.logger.already_exist()
                 task.update_status(Status.DONE)
+                # Stat callback: song skipped (already exists)
+                if self._on_skip:
+                    self._on_skip(task.logger.full_name)
                 return
 
             # Get M3U8
@@ -204,7 +216,10 @@ class Ripper:
                     local_filename = await run_sync(save, song_bytes, local_codec, task.metadata, task.playlist)
                     task.logger.saved()
                     task.update_status(Status.DONE)
-        
+                    # Stat callback: song saved successfully
+                    if self._on_success:
+                        self._on_success(task.logger.full_name)
+
                     if it(Config).download.afterDownloaded:
                         command = it(Config).download.afterDownloaded.format(filename=local_filename)
                         subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -231,6 +246,11 @@ class Ripper:
         finally:
             await self.download_manager.unregister_task(task)
             task.update_status(task.status)  # Ensure status is set
+            # Stat callback: check for failure
+            if task.status == Status.FAILED and self._on_failure:
+                song_name = getattr(task.logger, 'full_name', task.adamId)
+                error_msg = str(task.error) if task.error else "Unknown error"
+                self._on_failure(song_name, error_msg)
             if task.parentDone:
                 await task.parentDone.try_done()
 
@@ -278,7 +298,10 @@ class Ripper:
                     local_filename = await run_sync(save, song_bytes, Codec.AAC_LEGACY, task.metadata, task.playlist)
                     task.logger.saved()
                     task.update_status(Status.DONE)
-        
+                    # Stat callback: song saved successfully
+                    if self._on_success:
+                        self._on_success(task.logger.full_name)
+
                     if it(Config).download.afterDownloaded:
                         command = it(Config).download.afterDownloaded.format(filename=local_filename)
                         subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -292,10 +315,18 @@ class Ripper:
             task.logger.logger.warning("Task processing timed out after waiting in queue")
             task.update_status(Status.FAILED)
             task.error = Exception("Legacy Task execution timed out")
+            # Stat callback: failure
+            if self._on_failure:
+                song_name = getattr(task.logger, 'full_name', task.adamId)
+                self._on_failure(song_name, "Task execution timed out")
         except Exception as e:
             task.logger.logger.exception(f"Legacy rip failed: {e}")
             task.update_status(Status.FAILED)
             task.error = e
+            # Stat callback: failure
+            if self._on_failure:
+                song_name = getattr(task.logger, 'full_name', task.adamId)
+                self._on_failure(song_name, str(e))
             raise e
 
     async def rip_album(self, url: Album, codec: str, flags: Flags = Flags(), parent_done: ParentDoneHandler = None):
@@ -372,8 +403,13 @@ class Ripper:
         # We need to send the command to wrapper manager
         await it(WrapperManager).decrypt(adam_id, key, sample, sample_index)
 
-        # Wait for the future to be resolved by the callback
-        return await future
+        # Wait for the future to be resolved by the callback, with timeout to prevent hanging
+        # after stream disconnection. Timeout triggers retry via tenacity decorator.
+        timeout = it(Config).download.decryptTimeout
+        try:
+            return await asyncio.wait_for(future, timeout=timeout)
+        except asyncio.TimeoutError:
+            raise Exception(f"Decrypt request timed out after {timeout}s (stream may have disconnected)")
 
     async def on_decrypt_success(self, adam_id: str, key: str, sample: bytes, sample_index: int):
         it(Measurer).record_decrypt(len(sample))

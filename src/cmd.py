@@ -52,8 +52,12 @@ class InteractiveShell:
                 loop.run_until_complete(asyncio.sleep(3))
         else:
             loop.run_until_complete(it(WrapperManager).init(it(Config).instance.url, it(Config).instance.secure))
-        safely_create_task(it(WrapperManager).decrypt_init(on_success=self.ripper.on_decrypt_success,
-                                                           on_failure=self.ripper.on_decrypt_failed))
+        safely_create_task(it(WrapperManager).decrypt_init(
+            on_success=self.ripper.on_decrypt_success,
+            on_failure=self.ripper.on_decrypt_failed,
+            max_reconnect_attempts=it(Config).download.maxReconnectAttempts,
+            reconnect_delay=it(Config).download.reconnectDelay,
+        ))
         try:
             loop.run_until_complete(self.show_status())
         except grpc.aio._call.AioRpcError:

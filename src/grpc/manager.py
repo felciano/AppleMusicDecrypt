@@ -27,12 +27,24 @@ class WrapperManager:
     _stub: WrapperManagerServiceStub
     _decrypt_queue: asyncio.Queue[DecryptRequest]
     _login_lock: asyncio.Lock
+    _url: str
+    _secure: bool
+    _keepalive_task: asyncio.Task = None
+    reconnect_count: int = 0  # Track total reconnections
 
     def __init__(self):
         self._login_lock = asyncio.Lock()
         self._decrypt_queue = asyncio.Queue()
+        self.reconnect_count = 0
 
     async def init(self, url: str, secure: bool):
+        self._url = url
+        self._secure = secure
+        await self._create_channel()
+        return self
+
+    async def _create_channel(self):
+        """Create or recreate the gRPC channel."""
         service_config_json = json.dumps(
             {
                 "methodConfig": [
@@ -50,12 +62,11 @@ class WrapperManager:
             }
         )
         options = ((ChannelOptions.SingleThreadedUnaryStream, 1), ("grpc.service_config", service_config_json))
-        if secure:
-            self._channel = secure_channel(url, credentials=ssl_channel_credentials(), options=options)
+        if self._secure:
+            self._channel = secure_channel(self._url, credentials=ssl_channel_credentials(), options=options)
         else:
-            self._channel = insecure_channel(url, options=options)
+            self._channel = insecure_channel(self._url, options=options)
         self._stub = WrapperManagerServiceStub(self._channel)
-        return self
 
     @alru_cache
     async def status(self) -> StatusData:
@@ -108,20 +119,67 @@ class WrapperManager:
             yield await self._decrypt_queue.get()
 
     async def decrypt_init(self, on_success: Callable[[str, str, bytes, int], Awaitable[None]],
-                           on_failure: Callable[[str, str, bytes, int], Awaitable[None]]):
-        stream = self._stub.Decrypt(self._decrypt_request_generator())
-        safely_create_task(self._decrypt_keepalive())
-        async for reply in stream:
-            reply: DecryptReply
-            if reply.data.adam_id == "KEEPALIVE":
-                continue
-            match reply.header.code:
-                case -1:
-                    safely_create_task(
-                        on_failure(reply.data.adam_id, reply.data.key, reply.data.sample, reply.data.sample_index))
-                case 0:
-                    safely_create_task(
-                        on_success(reply.data.adam_id, reply.data.key, reply.data.sample, reply.data.sample_index))
+                           on_failure: Callable[[str, str, bytes, int], Awaitable[None]],
+                           max_reconnect_attempts: int = 10,
+                           reconnect_delay: float = 5.0):
+        """
+        Initialize the decrypt stream with automatic reconnection on failure.
+
+        Args:
+            on_success: Callback for successful decryption
+            on_failure: Callback for failed decryption
+            max_reconnect_attempts: Maximum number of reconnection attempts (0 = unlimited)
+            reconnect_delay: Delay in seconds between reconnection attempts
+        """
+        reconnect_count = 0
+
+        while max_reconnect_attempts == 0 or reconnect_count < max_reconnect_attempts:
+            try:
+                # Cancel existing keepalive task if any
+                if self._keepalive_task and not self._keepalive_task.done():
+                    self._keepalive_task.cancel()
+                    try:
+                        await self._keepalive_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Start new stream and keepalive
+                stream = self._stub.Decrypt(self._decrypt_request_generator())
+                self._keepalive_task = asyncio.create_task(self._decrypt_keepalive())
+
+                if reconnect_count > 0:
+                    it(GlobalLogger).logger.info(f"Decrypt stream reconnected successfully (attempt {reconnect_count})")
+                    reconnect_count = 0  # Reset on successful connection
+
+                async for reply in stream:
+                    reply: DecryptReply
+                    if reply.data.adam_id == "KEEPALIVE":
+                        continue
+                    match reply.header.code:
+                        case -1:
+                            safely_create_task(
+                                on_failure(reply.data.adam_id, reply.data.key, reply.data.sample, reply.data.sample_index))
+                        case 0:
+                            safely_create_task(
+                                on_success(reply.data.adam_id, reply.data.key, reply.data.sample, reply.data.sample_index))
+
+            except Exception as e:
+                reconnect_count += 1
+                self.reconnect_count += 1  # Track total reconnections
+                it(GlobalLogger).logger.warning(
+                    f"Decrypt stream disconnected: {e}. Reconnecting in {reconnect_delay}s (attempt {reconnect_count})..."
+                )
+
+                # Wait before reconnecting
+                await asyncio.sleep(reconnect_delay)
+
+                # Recreate the channel
+                try:
+                    await self._create_channel()
+                except Exception as channel_err:
+                    it(GlobalLogger).logger.error(f"Failed to recreate channel: {channel_err}")
+
+        it(GlobalLogger).logger.error(f"Decrypt stream failed after {max_reconnect_attempts} reconnection attempts")
 
     async def _decrypt_keepalive(self):
         while True:

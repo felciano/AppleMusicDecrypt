@@ -35,6 +35,14 @@ proxy = ""
 parallelNum = 1
 # Number of max running tasks
 maxRunningTasks = 128
+# Delay in seconds between queuing URLs in batch mode (helps avoid rate limiting)
+queueDelay = 5.0
+# Maximum reconnection attempts for decrypt stream (0 = unlimited)
+maxReconnectAttempts = 0
+# Delay in seconds between reconnection attempts
+reconnectDelay = 5.0
+# Timeout in seconds for individual decrypt requests (prevents stalls after reconnection)
+decryptTimeout = 60.0
 # Specify the IP address to use when downloading to speed up downloading
 # Taiwan: 17.253.117.201-17.253.117.203
 # Hongkong: 17.253.85.201-17.253.85.206, 17.253.87.195, 17.253.87.196, 17.253.87.201, 17.253.87.203
